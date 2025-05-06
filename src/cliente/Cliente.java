@@ -8,6 +8,7 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 import java.util.List;
+import java.nio.file.*;
 
 public class Cliente extends JFrame {
     
@@ -37,6 +38,10 @@ public class Cliente extends JFrame {
     private static String HOST = "localhost"; // Cambiado a variable no final
     private static final int PUERTO_DEFECTO = 5000;
     private int puerto = PUERTO_DEFECTO; // Variable de instancia para el puerto
+    
+    // Constantes para envío de archivos
+    private static final String COMANDO_ARCHIVO = "/archivo";
+    private static final int TAMAÑO_BUFFER = 4096;
     
     // Constructor
     public Cliente() {
@@ -175,6 +180,20 @@ public class Cliente extends JFrame {
         // Panel para enviar mensajes
         JPanel panelEnvio = new JPanel(new BorderLayout());
         campoMensaje = new JTextField();
+        
+        // Panel de botones
+        JPanel panelBotones = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        
+        // Botón para adjuntar archivos
+        JButton botonAdjuntar = new JButton("Adjuntar");
+        botonAdjuntar.setToolTipText("Enviar un archivo a la sala actual");
+        botonAdjuntar.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                enviarArchivo();
+            }
+        });
+        
         botonEnviar = new JButton("Enviar");
         botonEnviar.addActionListener(new ActionListener() {
             @Override
@@ -193,8 +212,12 @@ public class Cliente extends JFrame {
             }
         });
         
+        // Agregar botones al panel de botones
+        panelBotones.add(botonAdjuntar);
+        panelBotones.add(botonEnviar);
+        
         panelEnvio.add(campoMensaje, BorderLayout.CENTER);
-        panelEnvio.add(botonEnviar, BorderLayout.EAST);
+        panelEnvio.add(panelBotones, BorderLayout.EAST);
         panelEnvio.setBorder(BorderFactory.createEmptyBorder(10, 0, 0, 0));
         
         // Añadir componentes al panel de chat
@@ -219,6 +242,27 @@ public class Cliente extends JFrame {
         JLabel label = new JLabel("Mensaje privado para " + destinatario + ":");
         panel.add(label, BorderLayout.NORTH);
         
+        // Panel para agregar botón de adjuntar archivo
+        JPanel panelOpciones = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        JButton botonAdjuntar = new JButton("Adjuntar archivo");
+        
+        final File[] archivoSeleccionado = new File[1]; // Array para almacenar la referencia
+        
+        botonAdjuntar.addActionListener(new ActionListener() {
+            @Override
+            public void actionPerformed(ActionEvent e) {
+                JFileChooser fileChooser = new JFileChooser();
+                int resultado = fileChooser.showOpenDialog(panel);
+                if (resultado == JFileChooser.APPROVE_OPTION) {
+                    archivoSeleccionado[0] = fileChooser.getSelectedFile();
+                    botonAdjuntar.setText("Archivo: " + archivoSeleccionado[0].getName());
+                }
+            }
+        });
+        
+        panelOpciones.add(botonAdjuntar);
+        panel.add(panelOpciones, BorderLayout.SOUTH);
+        
         // Mostrar el panel en un diálogo
         int resultado = JOptionPane.showConfirmDialog(
             this, 
@@ -228,11 +272,16 @@ public class Cliente extends JFrame {
             JOptionPane.PLAIN_MESSAGE
         );
         
-        // Si el usuario hizo clic en OK y el mensaje no está vacío
+        // Si el usuario hizo clic en OK
         if (resultado == JOptionPane.OK_OPTION) {
+            // Si hay un archivo seleccionado, enviarlo
+            if (archivoSeleccionado[0] != null) {
+                enviarArchivoPrivado(destinatario, archivoSeleccionado[0]);
+            }
+            
+            // Enviar mensaje de texto si no está vacío
             String mensaje = textArea.getText().trim();
             if (!mensaje.isEmpty()) {
-                // Enviar el mensaje privado
                 enviarMensajeAlServidor("/privado " + destinatario + " " + mensaje);
             }
         }
@@ -337,6 +386,264 @@ public class Cliente extends JFrame {
         }
     }
     
+    // Método para enviar un archivo
+    private void enviarArchivo() {
+        if (!conectado) {
+            mostrarMensaje("Error: No estás conectado al servidor.");
+            return;
+        }
+        
+        JFileChooser fileChooser = new JFileChooser();
+        int resultado = fileChooser.showOpenDialog(this);
+        
+        if (resultado == JFileChooser.APPROVE_OPTION) {
+            File archivo = fileChooser.getSelectedFile();
+            
+            // Verificar tamaño del archivo (límite de 10MB para este ejemplo)
+            if (archivo.length() > 10 * 1024 * 1024) {
+                JOptionPane.showMessageDialog(this, 
+                    "El archivo es demasiado grande. El límite es de 10MB.",
+                    "Error", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+            
+            // Iniciar la transferencia en un hilo separado para no bloquear la UI
+            new Thread(() -> {
+                try {
+                    // Notificar al servidor que vamos a enviar un archivo
+                    String nombreArchivo = archivo.getName().replace(" ", "_"); // Reemplazar espacios
+                    enviarMensajeAlServidor(COMANDO_ARCHIVO + " " + salaActual + " " + nombreArchivo + " " + archivo.length());
+                    
+                    // Esperar un breve momento para que el servidor procese el comando
+                    Thread.sleep(500);
+                    
+                    // Crear socket para transmisión de archivos
+                    Socket socketArchivo = null;
+                    try {
+                        socketArchivo = new Socket(HOST, puerto + 1); // Puerto para archivos = puerto normal + 1
+                        
+                        // Enviar nombre de usuario para identificación
+                        PrintWriter salidaArchivo = new PrintWriter(socketArchivo.getOutputStream(), true);
+                        salidaArchivo.println(nombreUsuario);
+                        
+                        // Enviar datos del archivo
+                        FileInputStream fis = new FileInputStream(archivo);
+                        OutputStream os = socketArchivo.getOutputStream();
+                        
+                        byte[] buffer = new byte[TAMAÑO_BUFFER];
+                        int bytesLeidos;
+                        
+                        // Mensaje de progreso (sólo en consola, no en UI para no bloquear)
+                        System.out.println("Enviando archivo: " + archivo.getName());
+                        
+                        while ((bytesLeidos = fis.read(buffer)) != -1) {
+                            os.write(buffer, 0, bytesLeidos);
+                        }
+                        
+                        // Cerrar recursos
+                        os.flush();
+                        fis.close();
+                        
+                        SwingUtilities.invokeLater(() -> {
+                            mostrarMensaje("Has enviado el archivo: " + archivo.getName());
+                        });
+                    } catch (Exception e) {
+                        SwingUtilities.invokeLater(() -> {
+                            mostrarMensaje("Error al enviar el archivo: " + e.getMessage());
+                        });
+                        e.printStackTrace();
+                    } finally {
+                        // Asegurarnos de cerrar el socket incluso si hay un error
+                        if (socketArchivo != null && !socketArchivo.isClosed()) {
+                            try {
+                                socketArchivo.close();
+                            } catch (IOException e) {
+                                e.printStackTrace();
+                            }
+                        }
+                    }
+                } catch (Exception e) {
+                    SwingUtilities.invokeLater(() -> {
+                        mostrarMensaje("Error preparando envío de archivo: " + e.getMessage());
+                    });
+                    e.printStackTrace();
+                }
+            }).start();
+        }
+    }
+    
+    // Método para enviar un archivo privado a un usuario específico
+    private void enviarArchivoPrivado(String destinatario, File archivo) {
+        if (!conectado) {
+            mostrarMensaje("Error: No estás conectado al servidor.");
+            return;
+        }
+        
+        // Verificar tamaño del archivo (límite de 10MB para este ejemplo)
+        if (archivo.length() > 10 * 1024 * 1024) {
+            JOptionPane.showMessageDialog(this, 
+                "El archivo es demasiado grande. El límite es de 10MB.",
+                "Error", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+        
+        // Iniciar la transferencia en un hilo separado para no bloquear la UI
+        new Thread(() -> {
+            try {
+                // Notificar al servidor que vamos a enviar un archivo privado
+                String nombreArchivo = archivo.getName().replace(" ", "_"); // Reemplazar espacios
+                enviarMensajeAlServidor(COMANDO_ARCHIVO + " " + destinatario + " " + nombreArchivo + " " + archivo.length());
+                
+                // Esperar un breve momento para que el servidor procese el comando
+                Thread.sleep(500);
+                
+                // Crear socket para transmisión de archivos
+                Socket socketArchivo = null;
+                try {
+                    socketArchivo = new Socket(HOST, puerto + 1); // Puerto para archivos = puerto normal + 1
+                    
+                    // Enviar nombre de usuario para identificación
+                    PrintWriter salidaArchivo = new PrintWriter(socketArchivo.getOutputStream(), true);
+                    salidaArchivo.println(nombreUsuario);
+                    
+                    // Enviar datos del archivo
+                    FileInputStream fis = new FileInputStream(archivo);
+                    OutputStream os = socketArchivo.getOutputStream();
+                    
+                    byte[] buffer = new byte[TAMAÑO_BUFFER];
+                    int bytesLeidos;
+                    
+                    // Mensaje de progreso (sólo en consola, no en UI para no bloquear)
+                    System.out.println("Enviando archivo privado a " + destinatario + ": " + archivo.getName());
+                    
+                    while ((bytesLeidos = fis.read(buffer)) != -1) {
+                        os.write(buffer, 0, bytesLeidos);
+                    }
+                    
+                    // Cerrar recursos
+                    os.flush();
+                    fis.close();
+                    
+                    SwingUtilities.invokeLater(() -> {
+                        mostrarMensaje("Has enviado el archivo " + archivo.getName() + " a " + destinatario);
+                    });
+                } catch (Exception e) {
+                    SwingUtilities.invokeLater(() -> {
+                        mostrarMensaje("Error al enviar el archivo: " + e.getMessage());
+                    });
+                    e.printStackTrace();
+                } finally {
+                    // Asegurarnos de cerrar el socket incluso si hay un error
+                    if (socketArchivo != null && !socketArchivo.isClosed()) {
+                        try {
+                            socketArchivo.close();
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                SwingUtilities.invokeLater(() -> {
+                    mostrarMensaje("Error preparando envío de archivo: " + e.getMessage());
+                });
+                e.printStackTrace();
+            }
+        }).start();
+    }
+    
+    // Método para recibir un archivo (sin notificación, guardado automático)
+    private void recibirArchivo(String remitente, String nombreArchivo, long tamaño) {
+        // Crear directorio para archivos del usuario si no existe
+        File directorioUsuario = new File("Archivos" + nombreUsuario);
+        if (!directorioUsuario.exists()) {
+            directorioUsuario.mkdirs();
+        }
+        
+        // Archivo de destino
+        File archivoDestino = new File(directorioUsuario, nombreArchivo);
+        
+        // Comprobar si ya existe el archivo y renombrarlo si es necesario
+        if (archivoDestino.exists()) {
+            int contador = 1;
+            String nombreBase = nombreArchivo;
+            String extension = "";
+            
+            int indexPunto = nombreArchivo.lastIndexOf(".");
+            if (indexPunto > 0) {
+                nombreBase = nombreArchivo.substring(0, indexPunto);
+                extension = nombreArchivo.substring(indexPunto);
+            }
+            
+            while (archivoDestino.exists()) {
+                archivoDestino = new File(directorioUsuario, nombreBase + "(" + contador + ")" + extension);
+                contador++;
+            }
+        }
+        
+        // Iniciar la recepción en un hilo separado para no bloquear
+        final File archivoFinal = archivoDestino;
+        new Thread(() -> {
+            Socket socketArchivo = null;
+            try {
+                // Esperar un breve momento para asegurarnos que el servidor está listo
+                Thread.sleep(1000);
+                
+                // Crear socket para recepción de archivos
+                socketArchivo = new Socket(HOST, puerto + 1);
+                
+                // Identificar que estamos listos para recibir
+                PrintWriter salidaArchivo = new PrintWriter(socketArchivo.getOutputStream(), true);
+                salidaArchivo.println(nombreUsuario + "_RECIBIR_" + remitente);
+                
+                // Preparar para recibir
+                InputStream is = socketArchivo.getInputStream();
+                FileOutputStream fos = new FileOutputStream(archivoFinal);
+                
+                byte[] buffer = new byte[TAMAÑO_BUFFER];
+                int bytesLeidos;
+                long totalRecibido = 0;
+                
+                // Mensaje de progreso (sólo en consola, no en UI para no bloquear)
+                System.out.println("Recibiendo archivo de " + remitente + ": " + archivoFinal.getName());
+                
+                // Establecer un tiempo límite de lectura para evitar bloqueos indefinidos
+                socketArchivo.setSoTimeout(30000); // 30 segundos
+                
+                while (totalRecibido < tamaño && (bytesLeidos = is.read(buffer)) != -1) {
+                    fos.write(buffer, 0, bytesLeidos);
+                    totalRecibido += bytesLeidos;
+                }
+                
+                // Cerrar recursos
+                fos.close();
+                
+                SwingUtilities.invokeLater(() -> {
+                    mostrarMensaje("Archivo recibido de " + remitente + ": " + archivoFinal.getName() + " - Guardado en " + archivoFinal.getAbsolutePath());
+                });
+                
+            } catch (Exception e) {
+                SwingUtilities.invokeLater(() -> {
+                    mostrarMensaje("Error al recibir el archivo: " + e.getMessage());
+                });
+                e.printStackTrace();
+                
+                // Si hubo un error, eliminar el archivo parcial
+                if (archivoFinal.exists()) {
+                    archivoFinal.delete();
+                }
+            } finally {
+                // Asegurarnos de cerrar el socket incluso si hay un error
+                if (socketArchivo != null && !socketArchivo.isClosed()) {
+                    try {
+                        socketArchivo.close();
+                    } catch (IOException e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+        }).start();
+    }
+    
     // Método para cambiar de sala
     private void cambiarSala(String nuevaSala) {
         if (!nuevaSala.equals(salaActual)) {
@@ -381,6 +688,17 @@ public class Cliente extends JFrame {
                     } else if (mensaje.startsWith("USUARIOS:")) {
                         // Actualizar lista de usuarios
                         actualizarListaUsuarios(mensaje.substring(9).split("\\|"));
+                    } else if (mensaje.startsWith("ARCHIVO:")) {
+                        // Formato: ARCHIVO:remitente:nombreArchivo:tamaño
+                        String[] partes = mensaje.substring(8).split(":", 3);
+                        if (partes.length >= 3) {
+                            String remitente = partes[0];
+                            String nombreArchivo = partes[1];
+                            long tamaño = Long.parseLong(partes[2]);
+                            
+                            // Recibir archivo automáticamente sin preguntar
+                            recibirArchivo(remitente, nombreArchivo, tamaño);
+                        }
                     } else {
                         // Mostrar todos los mensajes (incluyendo privados) en la ventana principal
                         mostrarMensaje(mensaje);

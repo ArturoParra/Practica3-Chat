@@ -4,6 +4,7 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.nio.file.*;
 
 public class Servidor {
     // Puerto por defecto
@@ -15,15 +16,29 @@ public class Servidor {
     // Estructura para almacenar las salas de chat
     private static Map<String, Set<String>> salas = new ConcurrentHashMap<>();
     
-    // Servidor socket
+    // Estructura para almacenar las transferencias de archivos pendientes
+    private static Map<String, TransferenciaArchivo> transferenciasPendientes = new ConcurrentHashMap<>();
+    
+    // Servidor socket para mensajes
     private ServerSocket servidorSocket;
+    
+    // Servidor socket para transferencia de archivos
+    private ServerSocket servidorSocketArchivos;
+    
+    // Constantes para transferencia de archivos
+    private static final String COMANDO_ARCHIVO = "/archivo";
+    private static final int TAMAÑO_BUFFER = 4096;
     
     // Constructor
     public Servidor(int puerto) {
         try {
-            // Inicializar el servidor socket
+            // Inicializar el servidor socket para mensajes
             servidorSocket = new ServerSocket(puerto);
             System.out.println("Servidor iniciado en el puerto: " + puerto);
+            
+            // Inicializar servidor socket para transferencia de archivos
+            servidorSocketArchivos = new ServerSocket(puerto + 1);
+            System.out.println("Servidor de archivos iniciado en el puerto: " + (puerto + 1));
             
             // Mostrar las direcciones IP del servidor
             mostrarDireccionesIP();
@@ -31,7 +46,10 @@ public class Servidor {
             // Inicializar salas predeterminadas
             inicializarSalas();
             
-            // Iniciar el servidor
+            // Iniciar hilo para manejar transferencias de archivos
+            new Thread(() -> manejarTransferenciasArchivos()).start();
+            
+            // Iniciar el servidor de mensajes
             iniciarServidor();
         } catch (IOException e) {
             System.err.println("Error al iniciar el servidor: " + e.getMessage());
@@ -74,6 +92,202 @@ public class Servidor {
         }
     }
     
+    // Método para manejar transferencias de archivos
+    private void manejarTransferenciasArchivos() {
+        try {
+            while (true) {
+                Socket socketArchivo = servidorSocketArchivos.accept();
+                // Manejar cada transferencia en un hilo separado para no bloquear
+                new Thread(() -> procesarTransferenciaArchivo(socketArchivo)).start();
+            }
+        } catch (IOException e) {
+            System.err.println("Error en el servidor de archivos: " + e.getMessage());
+        }
+    }
+    
+    // Método para procesar una transferencia de archivo
+    private void procesarTransferenciaArchivo(Socket socketArchivo) {
+        try {
+            // Establecer tiempo de espera para evitar bloqueos indefinidos
+            socketArchivo.setSoTimeout(30000); // 30 segundos
+            
+            BufferedReader entrada = new BufferedReader(new InputStreamReader(socketArchivo.getInputStream()));
+            String identificacion = entrada.readLine();
+            
+            if (identificacion == null) {
+                socketArchivo.close();
+                return;
+            }
+            
+            System.out.println("Procesando identificación para transferencia: " + identificacion);
+            
+            // Verificar si es un envío o una recepción
+            if (identificacion.contains("_RECIBIR_")) {
+                // Cliente solicita recibir un archivo
+                String[] partes = identificacion.split("_RECIBIR_");
+                String receptor = partes[0];
+                String emisor = partes[1];
+                
+                // Buscar la transferencia pendiente
+                String clave = emisor + "_" + receptor;
+                
+                System.out.println("Cliente solicita recibir archivo. Clave de búsqueda: " + clave);
+                
+                TransferenciaArchivo transferencia = transferenciasPendientes.get(clave);
+                
+                if (transferencia != null) {
+                    System.out.println("Transferencia encontrada, enviando al cliente " + receptor);
+                    
+                    // Enviar el archivo al receptor sin notificación previa
+                    enviarArchivoAlCliente(socketArchivo, transferencia);
+                    transferenciasPendientes.remove(clave);
+                } else {
+                    System.out.println("No se encontró la transferencia pendiente para la clave: " + clave);
+                }
+            } else {
+                // Cliente envía un archivo
+                String emisor = identificacion;
+                
+                System.out.println("Cliente " + emisor + " está enviando un archivo");
+                
+                // Buscar la transferencia pendiente para este emisor
+                Optional<String> claveOpt = transferenciasPendientes.keySet().stream()
+                    .filter(k -> k.startsWith(emisor + "_"))
+                    .findFirst();
+                
+                if (claveOpt.isPresent()) {
+                    String clave = claveOpt.get();
+                    TransferenciaArchivo transferencia = transferenciasPendientes.get(clave);
+                    
+                    System.out.println("Transferencia pendiente encontrada: " + clave);
+                    
+                    // Recibir el archivo del emisor
+                    recibirArchivoDeCliente(socketArchivo, transferencia);
+                    
+                    // Si es mensaje para una sala, notificar a todos los usuarios de la sala
+                    if (transferencia.esParaSala()) {
+                        String sala = transferencia.getDestinatario();
+                        notificarArchivoASala(sala, transferencia.getNombreArchivo(), transferencia.getTamaño(), emisor);
+                    } else {
+                        // Notificar al destinatario que hay un archivo disponible sin pedir confirmación
+                        String destinatario = transferencia.getDestinatario();
+                        notificarArchivoAUsuario(destinatario, transferencia.getNombreArchivo(), transferencia.getTamaño(), emisor);
+                    }
+                } else {
+                    System.out.println("No se encontró transferencia pendiente para el emisor: " + emisor);
+                }
+            }
+        } catch (IOException e) {
+            System.err.println("Error procesando transferencia de archivo: " + e.getMessage());
+            e.printStackTrace();
+        } finally {
+            // Asegurarse de cerrar el socket de archivo en todos los casos
+            try {
+                if (socketArchivo != null && !socketArchivo.isClosed()) {
+                    socketArchivo.close();
+                }
+            } catch (IOException e) {
+                System.err.println("Error cerrando socket de archivo: " + e.getMessage());
+            }
+        }
+    }
+    
+    // Método para recibir un archivo de un cliente
+    private void recibirArchivoDeCliente(Socket socket, TransferenciaArchivo transferencia) {
+        try {
+            // Crear directorio temporal si no existe
+            Path directorioTemp = Paths.get("temp");
+            if (!Files.exists(directorioTemp)) {
+                Files.createDirectory(directorioTemp);
+            }
+            
+            // Crear archivo temporal para almacenar los datos
+            String nombreArchivo = transferencia.getNombreArchivo();
+            long tamaño = transferencia.getTamaño();
+            
+            Path archivoTemp = Paths.get("temp", transferencia.getEmisor() + "_" + nombreArchivo);
+            FileOutputStream fos = new FileOutputStream(archivoTemp.toFile());
+            
+            // Leer datos del socket
+            InputStream is = socket.getInputStream();
+            byte[] buffer = new byte[TAMAÑO_BUFFER];
+            int bytesLeidos;
+            long totalLeido = 0;
+            
+            while (totalLeido < tamaño && (bytesLeidos = is.read(buffer)) != -1) {
+                fos.write(buffer, 0, bytesLeidos);
+                totalLeido += bytesLeidos;
+            }
+            
+            fos.close();
+            
+            // Actualizar la transferencia con la ruta del archivo temporal
+            transferencia.setRutaArchivo(archivoTemp.toString());
+            
+            System.out.println("Archivo recibido y almacenado temporalmente: " + archivoTemp);
+        } catch (IOException e) {
+            System.err.println("Error al recibir archivo: " + e.getMessage());
+        }
+    }
+    
+    // Método para enviar un archivo a un cliente
+    private void enviarArchivoAlCliente(Socket socket, TransferenciaArchivo transferencia) {
+        try {
+            // Verificar que el archivo existe
+            Path archivoTemp = Paths.get(transferencia.getRutaArchivo());
+            if (!Files.exists(archivoTemp)) {
+                System.err.println("Archivo no encontrado: " + archivoTemp);
+                return;
+            }
+            
+            // Leer archivo y enviarlo por el socket
+            FileInputStream fis = new FileInputStream(archivoTemp.toFile());
+            OutputStream os = socket.getOutputStream();
+            
+            byte[] buffer = new byte[TAMAÑO_BUFFER];
+            int bytesLeidos;
+            
+            while ((bytesLeidos = fis.read(buffer)) != -1) {
+                os.write(buffer, 0, bytesLeidos);
+            }
+            
+            os.flush();
+            fis.close();
+            
+            System.out.println("Archivo enviado al cliente: " + transferencia.getDestinatario());
+            
+            // Eliminar archivo temporal después de enviarlo
+            Files.deleteIfExists(archivoTemp);
+        } catch (IOException e) {
+            System.err.println("Error al enviar archivo al cliente: " + e.getMessage());
+        }
+    }
+    
+    // Método para notificar a un usuario que hay un archivo disponible
+    private void notificarArchivoAUsuario(String usuario, String nombreArchivo, long tamaño, String remitente) {
+        ClienteHandler destinatario = clientesConectados.get(usuario);
+        if (destinatario != null) {
+            // Enviar la notificación sin solicitar confirmación
+            destinatario.enviarMensaje("ARCHIVO:" + remitente + ":" + nombreArchivo + ":" + tamaño);
+        }
+    }
+    
+    // Método para notificar a todos los usuarios de una sala que hay un archivo disponible
+    private void notificarArchivoASala(String sala, String nombreArchivo, long tamaño, String remitente) {
+        if (salas.containsKey(sala)) {
+            for (String usuario : salas.get(sala)) {
+                // No notificar al remitente
+                if (!usuario.equals(remitente)) {
+                    ClienteHandler cliente = clientesConectados.get(usuario);
+                    if (cliente != null) {
+                        // Enviar la notificación sin solicitar confirmación
+                        cliente.enviarMensaje("ARCHIVO:" + remitente + ":" + nombreArchivo + ":" + tamaño);
+                    }
+                }
+            }
+        }
+    }
+    
     // Método para inicializar las salas predeterminadas
     private void inicializarSalas() {
         salas.put("Sala General", new CopyOnWriteArraySet<>());
@@ -109,6 +323,10 @@ public class Servidor {
             if (servidorSocket != null && !servidorSocket.isClosed()) {
                 servidorSocket.close();
                 System.out.println("Servidor cerrado");
+            }
+            if (servidorSocketArchivos != null && !servidorSocketArchivos.isClosed()) {
+                servidorSocketArchivos.close();
+                System.out.println("Servidor de archivos cerrado");
             }
         } catch (IOException e) {
             System.err.println("Error al cerrar el servidor: " + e.getMessage());
@@ -265,73 +483,122 @@ public class Servidor {
         
         // Método para procesar mensajes recibidos
         private void procesarMensaje(String mensaje) {
-            if (mensaje.startsWith("/privado ")) {
-                // Mensaje privado: /privado nombreUsuario mensaje
-                String[] partes = mensaje.split(" ", 3);
-                if (partes.length >= 3) {
-                    String destinatario = partes[1];
-                    String contenido = partes[2];
-                    
-                    // Verificar si el destinatario existe
-                    if (clientesConectados.containsKey(destinatario)) {
-                        enviarMensajePrivado(destinatario, contenido, nombreUsuario);
+            try {
+                if (mensaje.startsWith(COMANDO_ARCHIVO)) {
+                    System.out.println("Procesando comando de archivo: " + mensaje);
+                    // Formato: /archivo destinatario nombreArchivo tamaño
+                    String[] partes = mensaje.substring(COMANDO_ARCHIVO.length()).trim().split(" ", 3);
+                    if (partes.length >= 3) {
+                        String destinatario = partes[0];
+                        String nombreArchivo = partes[1];
+                        long tamaño;
+                        try {
+                            tamaño = Long.parseLong(partes[2]);
+                        } catch (NumberFormatException e) {
+                            System.err.println("Error al analizar el tamaño del archivo: " + e.getMessage());
+                            enviarMensaje("Error: Formato de tamaño de archivo incorrecto.");
+                            return;
+                        }
+                        
+                        // Comprobar si el destinatario existe (sea una sala o un usuario)
+                        if (!salas.containsKey(destinatario) && !clientesConectados.containsKey(destinatario)) {
+                            enviarMensaje("Error: El destinatario '" + destinatario + "' no existe.");
+                            return;
+                        }
+                        
+                        // Crear objeto de transferencia
+                        TransferenciaArchivo transferencia = new TransferenciaArchivo(
+                            nombreUsuario, destinatario, nombreArchivo, tamaño);
+                        
+                        // Guardar la transferencia pendiente
+                        String clave = nombreUsuario + "_" + destinatario;
+                        transferenciasPendientes.put(clave, transferencia);
+                        
+                        System.out.println("Nueva transferencia pendiente: " + transferencia);
+                        enviarMensaje("Preparando transferencia de archivo: " + nombreArchivo);
                     } else {
-                        enviarMensaje("Error: El usuario " + destinatario + " no está conectado.");
+                        enviarMensaje("Error: Formato incorrecto para el comando de archivo.");
+                        System.err.println("Formato incorrecto para el comando de archivo: " + mensaje);
                     }
+                } else if (mensaje.startsWith("/privado ")) {
+                    // Mensaje privado: /privado nombreUsuario mensaje
+                    String[] partes = mensaje.split(" ", 3);
+                    if (partes.length >= 3) {
+                        String destinatario = partes[1];
+                        String contenido = partes[2];
+                        
+                        // Verificar si el destinatario existe
+                        if (clientesConectados.containsKey(destinatario)) {
+                            enviarMensajePrivado(destinatario, contenido, nombreUsuario);
+                        } else {
+                            enviarMensaje("Error: El usuario " + destinatario + " no está conectado.");
+                        }
+                    } else {
+                        enviarMensaje("Formato incorrecto. Uso: /privado nombreUsuario mensaje");
+                    }
+                } else if (mensaje.startsWith("/sala ")) {
+                    // Cambiar de sala: /sala nombreSala
+                    String nuevaSala = mensaje.substring(6).trim();
+                    if (salas.containsKey(nuevaSala)) {
+                        // Salir de la sala actual
+                        salirDeSala(salaActual, nombreUsuario);
+                        // Entrar a la nueva sala
+                        salaActual = nuevaSala;
+                        unirseASala(salaActual, nombreUsuario);
+                    } else {
+                        enviarMensaje("La sala " + nuevaSala + " no existe.");
+                    }
+                } else if (mensaje.startsWith("/crearsala ")) {
+                    // Crear una nueva sala: /crearsala nombreSala
+                    String nuevaSala = mensaje.substring(11).trim();
+                    if (!salas.containsKey(nuevaSala)) {
+                        salas.put(nuevaSala, new CopyOnWriteArraySet<>());
+                        enviarMensaje("Has creado la sala: " + nuevaSala);
+                        notificarListaSalas();
+                    } else {
+                        enviarMensaje("La sala " + nuevaSala + " ya existe.");
+                    }
+                } else if (mensaje.startsWith("/ayuda")) {
+                    // Mostrar comandos disponibles
+                    enviarMensaje("Comandos disponibles:\n" +
+                                "/privado nombreUsuario mensaje - Iniciar o continuar chat privado\n" +
+                                "/sala nombreSala - Cambiar de sala\n" +
+                                "/crearsala nombreSala - Crear una nueva sala\n" +
+                                "/salas - Ver las salas disponibles\n" +
+                                "/usuarios - Ver los usuarios conectados\n" +
+                                "/salir - Desconectarse del servidor\n" +
+                                "/archivo destinatario nombreArchivo tamaño - Enviar un archivo");
+                } else if (mensaje.startsWith("/salas")) {
+                    // Mostrar salas disponibles
+                    StringBuilder listaSalas = new StringBuilder("Salas disponibles:\n");
+                    for (String sala : salas.keySet()) {
+                        listaSalas.append("- ").append(sala).append(" (").append(salas.get(sala).size()).append(" usuarios)\n");
+                    }
+                    enviarMensaje(listaSalas.toString());
+                } else if (mensaje.startsWith("/usuarios")) {
+                    // Mostrar usuarios conectados
+                    StringBuilder listaUsuarios = new StringBuilder("Usuarios conectados:\n");
+                    for (String usuario : clientesConectados.keySet()) {
+                        listaUsuarios.append("- ").append(usuario).append("\n");
+                    }
+                    enviarMensaje(listaUsuarios.toString());
+                } else if (mensaje.startsWith("/salir")) {
+                    // Desconectar usuario
+                    cerrarConexion();
                 } else {
-                    enviarMensaje("Formato incorrecto. Uso: /privado nombreUsuario mensaje");
+                    // Mensaje normal para la sala actual
+                    enviarMensajeASala(salaActual, mensaje, nombreUsuario);
                 }
-            } else if (mensaje.startsWith("/sala ")) {
-                // Cambiar de sala: /sala nombreSala
-                String nuevaSala = mensaje.substring(6).trim();
-                if (salas.containsKey(nuevaSala)) {
-                    // Salir de la sala actual
-                    salirDeSala(salaActual, nombreUsuario);
-                    // Entrar a la nueva sala
-                    salaActual = nuevaSala;
-                    unirseASala(salaActual, nombreUsuario);
-                } else {
-                    enviarMensaje("La sala " + nuevaSala + " no existe.");
+            } catch (Exception e) {
+                System.err.println("Error al procesar mensaje del cliente " + nombreUsuario + ": " + e.getMessage());
+                e.printStackTrace();
+                try {
+                    // En caso de error, notificar al cliente y continuar atendiendo mensajes
+                    enviarMensaje("Error al procesar tu solicitud. Por favor, inténtalo de nuevo.");
+                } catch (Exception ex) {
+                    // Si no podemos enviar mensajes, la conexión probablemente está rota
+                    cerrarConexion();
                 }
-            } else if (mensaje.startsWith("/crearsala ")) {
-                // Crear una nueva sala: /crearsala nombreSala
-                String nuevaSala = mensaje.substring(11).trim();
-                if (!salas.containsKey(nuevaSala)) {
-                    salas.put(nuevaSala, new CopyOnWriteArraySet<>());
-                    enviarMensaje("Has creado la sala: " + nuevaSala);
-                    notificarListaSalas();
-                } else {
-                    enviarMensaje("La sala " + nuevaSala + " ya existe.");
-                }
-            } else if (mensaje.startsWith("/ayuda")) {
-                // Mostrar comandos disponibles
-                enviarMensaje("Comandos disponibles:\n" +
-                              "/privado nombreUsuario mensaje - Iniciar o continuar chat privado\n" +
-                              "/sala nombreSala - Cambiar de sala\n" +
-                              "/crearsala nombreSala - Crear una nueva sala\n" +
-                              "/salas - Ver las salas disponibles\n" +
-                              "/usuarios - Ver los usuarios conectados\n" +
-                              "/salir - Desconectarse del servidor");
-            } else if (mensaje.startsWith("/salas")) {
-                // Mostrar salas disponibles
-                StringBuilder listaSalas = new StringBuilder("Salas disponibles:\n");
-                for (String sala : salas.keySet()) {
-                    listaSalas.append("- ").append(sala).append(" (").append(salas.get(sala).size()).append(" usuarios)\n");
-                }
-                enviarMensaje(listaSalas.toString());
-            } else if (mensaje.startsWith("/usuarios")) {
-                // Mostrar usuarios conectados
-                StringBuilder listaUsuarios = new StringBuilder("Usuarios conectados:\n");
-                for (String usuario : clientesConectados.keySet()) {
-                    listaUsuarios.append("- ").append(usuario).append("\n");
-                }
-                enviarMensaje(listaUsuarios.toString());
-            } else if (mensaje.startsWith("/salir")) {
-                // Desconectar usuario
-                cerrarConexion();
-            } else {
-                // Mensaje normal para la sala actual
-                enviarMensajeASala(salaActual, mensaje, nombreUsuario);
             }
         }
         
@@ -368,6 +635,62 @@ public class Servidor {
             } catch (IOException e) {
                 System.err.println("Error al cerrar la conexión: " + e.getMessage());
             }
+        }
+    }
+    
+    // Clase para representar una transferencia de archivo
+    private static class TransferenciaArchivo {
+        private String emisor;
+        private String destinatario;
+        private String nombreArchivo;
+        private long tamaño;
+        private String rutaArchivo;
+        
+        public TransferenciaArchivo(String emisor, String destinatario, String nombreArchivo, long tamaño) {
+            this.emisor = emisor;
+            this.destinatario = destinatario;
+            this.nombreArchivo = nombreArchivo;
+            this.tamaño = tamaño;
+        }
+        
+        public String getEmisor() {
+            return emisor;
+        }
+        
+        public String getDestinatario() {
+            return destinatario;
+        }
+        
+        public String getNombreArchivo() {
+            return nombreArchivo;
+        }
+        
+        public long getTamaño() {
+            return tamaño;
+        }
+        
+        public String getRutaArchivo() {
+            return rutaArchivo;
+        }
+        
+        public void setRutaArchivo(String rutaArchivo) {
+            this.rutaArchivo = rutaArchivo;
+        }
+        
+        public boolean esParaSala() {
+            // Verificar si el destinatario es una sala (no un usuario)
+            return salas.containsKey(destinatario);
+        }
+        
+        @Override
+        public String toString() {
+            return "TransferenciaArchivo{" +
+                   "emisor='" + emisor + '\'' +
+                   ", destinatario='" + destinatario + '\'' +
+                   ", nombreArchivo='" + nombreArchivo + '\'' +
+                   ", tamaño=" + tamaño +
+                   ", rutaArchivo='" + rutaArchivo + '\'' +
+                   '}';
         }
     }
     
