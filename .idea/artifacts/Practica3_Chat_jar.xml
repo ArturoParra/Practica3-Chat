@@ -1,0 +1,8 @@
+<component name="ArtifactManager">
+  <artifact type="jar" name="Practica3-Chat:jar">
+    <output-path>$PROJECT_DIR$/out/artifacts/Practica3_Chat_jar</output-path>
+    <root id="archive" name="Practica3-Chat.jar">
+      <element id="module-output" name="Practica3-Chat" />
+    </root>
+  </artifact>
+</component>
