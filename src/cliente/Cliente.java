@@ -27,12 +27,11 @@ public class Cliente extends JFrame {
     private DefaultListModel<String> modeloUsuarios;
     
     // Componentes de red
-    private Socket socket;
-    private PrintWriter salida;
+    private Socket socket;    private PrintWriter salida;
     private BufferedReader entrada;
     private boolean conectado = false;
     private String nombreUsuario;
-    private String salaActual = "Sala General";
+    private String salaActual = "Sala-General";
     
     // Constantes y variables de conexión
     private static String HOST = "localhost"; // Cambiado a variable no final
@@ -47,12 +46,11 @@ public class Cliente extends JFrame {
     public Cliente() {
         this(HOST, PUERTO_DEFECTO);
     }
-    
-    // Constructor con parámetros
+      // Constructor con parámetros
     public Cliente(String host, int puerto) {
         // Configuración básica de la ventana
         super("Cliente de Chat");
-        this.HOST = host;
+        Cliente.HOST = host;
         this.puerto = puerto; // Guardamos el puerto recibido
         
         setSize(800, 600);
@@ -112,16 +110,24 @@ public class Cliente extends JFrame {
         
         JScrollPane scrollSalas = new JScrollPane(listaSalas);
         panelSalas.add(scrollSalas, BorderLayout.CENTER);
-        
-        // Botón para crear salas
+          // Botón para crear salas
         JButton botonCrearSala = new JButton("Crear Sala");
         botonCrearSala.addActionListener(new ActionListener() {
             @Override
             public void actionPerformed(ActionEvent e) {
+                String mensaje = "Ingrese nombre de la nueva sala:\n(No use espacios, use guiones (-) para separar palabras)";
                 String nombreSala = JOptionPane.showInputDialog(Cliente.this, 
-                    "Ingrese nombre de la nueva sala:", "Crear Sala", JOptionPane.PLAIN_MESSAGE);
+                    mensaje, "Crear Sala", JOptionPane.PLAIN_MESSAGE);
                 
                 if (nombreSala != null && !nombreSala.trim().isEmpty()) {
+                    // Validar que no contenga espacios
+                    if (nombreSala.contains(" ")) {
+                        JOptionPane.showMessageDialog(Cliente.this,
+                            "El nombre de la sala no debe contener espacios.\nUsa guiones (-) en lugar de espacios.",
+                            "Error", JOptionPane.ERROR_MESSAGE);
+                        return;
+                    }
+                    
                     enviarMensajeAlServidor("/crearsala " + nombreSala);
                 }
             }
@@ -408,11 +414,12 @@ public class Cliente extends JFrame {
             }
             
             // Iniciar la transferencia en un hilo separado para no bloquear la UI
-            new Thread(() -> {
-                try {
-                    // Notificar al servidor que vamos a enviar un archivo
+            new Thread(() -> {                try {                    // Notificar al servidor que vamos a enviar un archivo
                     String nombreArchivo = archivo.getName().replace(" ", "_"); // Reemplazar espacios
-                    enviarMensajeAlServidor(COMANDO_ARCHIVO + " " + salaActual + " " + nombreArchivo + " " + archivo.length());
+                    // Si la sala contiene guiones, no necesitamos comillas
+                    String comando = COMANDO_ARCHIVO + " " + salaActual + " " + nombreArchivo + " " + archivo.length();
+                    System.out.println("Enviando comando: " + comando);
+                    enviarMensajeAlServidor(comando);
                     
                     // Esperar un breve momento para que el servidor procese el comando
                     Thread.sleep(500);
@@ -488,11 +495,13 @@ public class Cliente extends JFrame {
         }
         
         // Iniciar la transferencia en un hilo separado para no bloquear la UI
-        new Thread(() -> {
-            try {
-                // Notificar al servidor que vamos a enviar un archivo privado
+        new Thread(() -> {            try {                // Notificar al servidor que vamos a enviar un archivo privado
                 String nombreArchivo = archivo.getName().replace(" ", "_"); // Reemplazar espacios
-                enviarMensajeAlServidor(COMANDO_ARCHIVO + " " + destinatario + " " + nombreArchivo + " " + archivo.length());
+                // Si el destinatario contiene espacios, añadir comillas
+                String formattedDestinatario = destinatario.contains(" ") ? "\"" + destinatario + "\"" : destinatario;
+                String comando = COMANDO_ARCHIVO + " " + formattedDestinatario + " " + nombreArchivo + " " + archivo.length();
+                System.out.println("Enviando comando: " + comando);
+                enviarMensajeAlServidor(comando);
                 
                 // Esperar un breve momento para que el servidor procese el comando
                 Thread.sleep(500);
@@ -688,16 +697,21 @@ public class Cliente extends JFrame {
                     } else if (mensaje.startsWith("USUARIOS:")) {
                         // Actualizar lista de usuarios
                         actualizarListaUsuarios(mensaje.substring(9).split("\\|"));
-                    } else if (mensaje.startsWith("ARCHIVO:")) {
-                        // Formato: ARCHIVO:remitente:nombreArchivo:tamaño
+                    } else if (mensaje.startsWith("ARCHIVO:")) {                        // Formato: ARCHIVO:remitente:nombreArchivo:tamaño
                         String[] partes = mensaje.substring(8).split(":", 3);
                         if (partes.length >= 3) {
                             String remitente = partes[0];
                             String nombreArchivo = partes[1];
-                            long tamaño = Long.parseLong(partes[2]);
                             
-                            // Recibir archivo automáticamente sin preguntar
-                            recibirArchivo(remitente, nombreArchivo, tamaño);
+                            try {
+                                long tamaño = Long.parseLong(partes[2]);
+                                
+                                // Recibir archivo automáticamente sin preguntar
+                                recibirArchivo(remitente, nombreArchivo, tamaño);
+                            } catch (NumberFormatException e) {
+                                mostrarMensaje("Error al procesar el tamaño del archivo: " + e.getMessage());
+                                System.err.println("Error al analizar el tamaño del archivo: " + e.getMessage());
+                            }
                         }
                     } else {
                         // Mostrar todos los mensajes (incluyendo privados) en la ventana principal

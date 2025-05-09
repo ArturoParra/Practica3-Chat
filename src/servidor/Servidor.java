@@ -287,13 +287,12 @@ public class Servidor {
             }
         }
     }
-    
-    // Método para inicializar las salas predeterminadas
+      // Método para inicializar las salas predeterminadas
     private void inicializarSalas() {
-        salas.put("Sala General", new CopyOnWriteArraySet<>());
-        salas.put("Java Developers", new CopyOnWriteArraySet<>());
+        salas.put("Sala-General", new CopyOnWriteArraySet<>());
+        salas.put("Java-Developers", new CopyOnWriteArraySet<>());
         salas.put("Networking", new CopyOnWriteArraySet<>());
-        salas.put("ESCOM Alumnos", new CopyOnWriteArraySet<>());
+        salas.put("ESCOM-Alumnos", new CopyOnWriteArraySet<>());
         System.out.println("Salas inicializadas: " + salas.keySet());
     }
     
@@ -427,11 +426,10 @@ public class Servidor {
         private BufferedReader entrada;
         private String nombreUsuario;
         private String salaActual;
-        
-        // Constructor
+          // Constructor
         public ClienteHandler(Socket socket) {
             this.clienteSocket = socket;
-            this.salaActual = "Sala General"; // Sala por defecto
+            this.salaActual = "Sala-General"; // Sala por defecto
         }
         
         @Override
@@ -486,14 +484,48 @@ public class Servidor {
             try {
                 if (mensaje.startsWith(COMANDO_ARCHIVO)) {
                     System.out.println("Procesando comando de archivo: " + mensaje);
-                    // Formato: /archivo destinatario nombreArchivo tamaño
-                    String[] partes = mensaje.substring(COMANDO_ARCHIVO.length()).trim().split(" ", 3);
-                    if (partes.length >= 3) {
-                        String destinatario = partes[0];
-                        String nombreArchivo = partes[1];
+                    // Formato esperado: /archivo "destinatario" nombreArchivo tamaño
+                    // Extraemos el comando primero
+                    String mensajeSinComando = mensaje.substring(COMANDO_ARCHIVO.length()).trim();
+                    
+                    // Verificamos si el destinatario está entre comillas para manejar nombres con espacios
+                    String destinatario;
+                    String restoMensaje;
+                    
+                    if (mensajeSinComando.startsWith("\"")) {
+                        // El destinatario está entre comillas
+                        int finComillas = mensajeSinComando.indexOf("\"", 1);
+                        if (finComillas > 0) {
+                            destinatario = mensajeSinComando.substring(1, finComillas);
+                            restoMensaje = mensajeSinComando.substring(finComillas + 1).trim();
+                        } else {
+                            enviarMensaje("Error: Formato incorrecto. El destinatario debe estar entre comillas.");
+                            return;
+                        }
+                    } else {
+                        // Formato antiguo - intentamos separar por el primer espacio
+                        int primerEspacio = mensajeSinComando.indexOf(" ");
+                        if (primerEspacio <= 0) {
+                            enviarMensaje("Error: Formato incorrecto. Uso: /archivo \"destinatario\" nombreArchivo tamaño");
+                            return;
+                        }
+                        destinatario = mensajeSinComando.substring(0, primerEspacio);
+                        restoMensaje = mensajeSinComando.substring(primerEspacio + 1).trim();
+                    }
+                    
+                    // Buscamos la última ocurrencia de espacio para separar el tamaño
+                    int ultimoEspacio = restoMensaje.lastIndexOf(" ");
+                    
+                    if (ultimoEspacio > 0 && ultimoEspacio < restoMensaje.length() - 1) {
+                        // Obtenemos la cadena del tamaño (último parámetro)
+                        String tamañoStr = restoMensaje.substring(ultimoEspacio + 1);
+                        
+                        // El nombre del archivo es todo lo que hay antes del tamaño
+                        String nombreArchivo = restoMensaje.substring(0, ultimoEspacio);
+                        
                         long tamaño;
                         try {
-                            tamaño = Long.parseLong(partes[2]);
+                            tamaño = Long.parseLong(tamañoStr);
                         } catch (NumberFormatException e) {
                             System.err.println("Error al analizar el tamaño del archivo: " + e.getMessage());
                             enviarMensaje("Error: Formato de tamaño de archivo incorrecto.");
@@ -547,23 +579,28 @@ public class Servidor {
                         unirseASala(salaActual, nombreUsuario);
                     } else {
                         enviarMensaje("La sala " + nuevaSala + " no existe.");
-                    }
-                } else if (mensaje.startsWith("/crearsala ")) {
+                    }                } else if (mensaje.startsWith("/crearsala ")) {
                     // Crear una nueva sala: /crearsala nombreSala
                     String nuevaSala = mensaje.substring(11).trim();
+                    
+                    // Validar que el nombre no contenga espacios
+                    if (nuevaSala.contains(" ")) {
+                        enviarMensaje("Error: El nombre de la sala no debe contener espacios. Usa guiones (-) en lugar de espacios.");
+                        return;
+                    }
+                    
                     if (!salas.containsKey(nuevaSala)) {
                         salas.put(nuevaSala, new CopyOnWriteArraySet<>());
                         enviarMensaje("Has creado la sala: " + nuevaSala);
                         notificarListaSalas();
                     } else {
                         enviarMensaje("La sala " + nuevaSala + " ya existe.");
-                    }
-                } else if (mensaje.startsWith("/ayuda")) {
+                    }                } else if (mensaje.startsWith("/ayuda")) {
                     // Mostrar comandos disponibles
                     enviarMensaje("Comandos disponibles:\n" +
                                 "/privado nombreUsuario mensaje - Iniciar o continuar chat privado\n" +
                                 "/sala nombreSala - Cambiar de sala\n" +
-                                "/crearsala nombreSala - Crear una nueva sala\n" +
+                                "/crearsala nombreSala - Crear una nueva sala (usa guiones en lugar de espacios, ej: Mi-Sala)\n" +
                                 "/salas - Ver las salas disponibles\n" +
                                 "/usuarios - Ver los usuarios conectados\n" +
                                 "/salir - Desconectarse del servidor\n" +
