@@ -4,6 +4,7 @@ import java.io.*;
 import java.net.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.stream.Collectors;
 import java.nio.file.*;
 
 public class Servidor {
@@ -144,27 +145,27 @@ public class Servidor {
                 } else {
                     System.out.println("No se encontró la transferencia pendiente para la clave: " + clave);
                 }
-            } else {
-                // Cliente envía un archivo
+            } else {                // Cliente envía un archivo
                 String emisor = identificacion;
                 
                 System.out.println("Cliente " + emisor + " está enviando un archivo");
                 
-                // Buscar la transferencia pendiente para este emisor
-                Optional<String> claveOpt = transferenciasPendientes.keySet().stream()
+                // Buscar todas las transferencias pendientes para este emisor
+                // Obtener una lista con todas las claves de transferencias pendientes para este emisor
+                List<String> clavesEmisores = transferenciasPendientes.keySet().stream()
                     .filter(k -> k.startsWith(emisor + "_"))
-                    .findFirst();
+                    .collect(Collectors.toList());
                 
-                if (claveOpt.isPresent()) {
-                    String clave = claveOpt.get();
+                if (!clavesEmisores.isEmpty()) {
+                    // Tomar la primera transferencia para procesarla
+                    String clave = clavesEmisores.get(0);
                     TransferenciaArchivo transferencia = transferenciasPendientes.get(clave);
                     
                     System.out.println("Transferencia pendiente encontrada: " + clave);
                     
                     // Recibir el archivo del emisor
                     recibirArchivoDeCliente(socketArchivo, transferencia);
-                    
-                    // Si es mensaje para una sala, notificar a todos los usuarios de la sala
+                      // Si es mensaje para una sala, notificar a todos los usuarios de la sala
                     if (transferencia.esParaSala()) {
                         String sala = transferencia.getDestinatario();
                         notificarArchivoASala(sala, transferencia.getNombreArchivo(), transferencia.getTamaño(), emisor);
@@ -173,6 +174,9 @@ public class Servidor {
                         String destinatario = transferencia.getDestinatario();
                         notificarArchivoAUsuario(destinatario, transferencia.getNombreArchivo(), transferencia.getTamaño(), emisor);
                     }
+                    
+                    // Eliminar la transferencia pendiente después de procesarla
+                    transferenciasPendientes.remove(clave);
                 } else {
                     System.out.println("No se encontró transferencia pendiente para el emisor: " + emisor);
                 }
